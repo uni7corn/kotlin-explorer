@@ -16,70 +16,161 @@
 
 package dev.romainguy.kotlin.explorer
 
-import androidx.compose.runtime.Stable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
+import androidx.collection.MutableScatterMap
+import androidx.collection.mutableScatterMapOf
+import androidx.compose.runtime.*
+import androidx.compose.ui.window.WindowPlacement
+import androidx.compose.ui.window.WindowPlacement.Floating
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 import kotlin.io.path.exists
 import kotlin.io.path.readLines
 
+private const val AndroidHome = "ANDROID_HOME"
+private const val KotlinHome = "KOTLIN_HOME"
+private const val Optimize = "OPTIMIZE"
+private const val KeepEverything = "KEEP_EVERYTHING"
+private const val KotlinOnlyConsumers = "KOTLIN_ONLY_CONSUMERS"
+private const val CompilerFlags = "COMPILER_FLAGS"
+private const val R8Rules = "R8_RULES"
+private const val ComposeVersion = "COMPOSE_VERSION"
+private const val MinApi = "MIN_API"
+private const val AutoBuildOnStartup = "AUTO_BUILD_ON_STARTUP"
+private const val Presentation = "PRESENTATION"
+private const val ShowLineNumbers = "SHOW_LINE_NUMBERS"
+private const val ShowByteCode = "SHOW_BYTE_CODE"
+private const val ShowDex = "SHOW_DEX"
+private const val ShowOat = "SHOW_OAT"
+private const val SyncLines = "SYNC_LINES"
+private const val Indent = "INDENT"
+private const val DecompileHiddenIsa = "DECOMPILE_HIDDEN_ISA"
+private const val LineNumberWidth = "LINE_NUMBER_WIDTH"
+private const val WindowPosX = "WINDOW_X"
+private const val WindowPosY = "WINDOW_Y"
+private const val WindowWidth = "WINDOW_WIDTH"
+private const val WindowHeight = "WINDOW_HEIGHT"
+private const val Placement = "WINDOW_PLACEMENT"
+
 @Stable
-class ExplorerState(
-    val settings: Settings = Settings()
-) {
-    var toolPaths by mutableStateOf(createToolPaths(settings))
-    var optimize by mutableStateOf(true)
-    var sourceCode = readSourceCode(toolPaths)
+class ExplorerState {
+    val directory: Path = settingsPath()
+    private val file: Path = directory.resolve("settings")
+    private val entries: MutableScatterMap<String, String> = readSettings(file)
+
+    var androidHome by StringState(AndroidHome, System.getenv("ANDROID_HOME") ?: System.getProperty("user.home"))
+    var kotlinHome by StringState(KotlinHome, System.getenv("KOTLIN_HOME") ?: System.getProperty("user.home"))
+    var toolPaths by mutableStateOf(createToolPaths())
+    var optimize by BooleanState(Optimize, true)
+    var keepEverything by BooleanState(KeepEverything, true)
+    var kotlinOnlyConsumers by BooleanState(KotlinOnlyConsumers, true)
+    var compilerFlags by StringState(CompilerFlags, "")
+    var r8Rules by StringState(R8Rules, "")
+    var composeVersion by StringState(ComposeVersion, "1.8.1")
+    var minApi by IntState(MinApi, 21)
+    var autoBuildOnStartup by BooleanState(AutoBuildOnStartup, false)
+    var presentationMode by BooleanState(Presentation, false)
+    var showLineNumbers by BooleanState(ShowLineNumbers, false)
+    var showByteCode by BooleanState(ShowByteCode, false)
+    var showDex by BooleanState(ShowDex, true)
+    var showOat by BooleanState(ShowOat, true)
+    var showLogsAndDocumentation by mutableStateOf(false)
+    var syncLines by BooleanState(SyncLines, true)
+    var lineNumberWidth by IntState(LineNumberWidth, 4)
+    var indent by IntState(Indent, 4)
+    var decompileHiddenIsa by BooleanState(DecompileHiddenIsa, true)
+    var sourceCode: String = readSourceCode(toolPaths)
+    var windowWidth by IntState(WindowWidth, 1900)
+    var windowHeight by IntState(WindowHeight, 1600)
+    var windowPosX by IntState(WindowPosX, -1)
+    var windowPosY by IntState(WindowPosY, -1)
+    var windowPlacement by SettingsState(Placement, Floating) { WindowPlacement.valueOf(this) }
 
     fun reloadToolPathsFromSettings() {
-        toolPaths = createToolPaths(settings)
+        toolPaths = createToolPaths()
+    }
+
+    private fun createToolPaths() = ToolPaths(directory, Path.of(androidHome), Path.of(kotlinHome))
+
+    private inner class BooleanState(key: String, initialValue: Boolean) :
+        SettingsState<Boolean>(key, initialValue, { toBoolean() })
+
+    private inner class IntState(key: String, initialValue: Int) :
+        SettingsState<Int>(key, initialValue, { toInt() })
+
+    private inner class StringState(key: String, initialValue: String) :
+        SettingsState<String>(key, initialValue, { this })
+
+    private open inner class SettingsState<T>(private val key: String, initialValue: T, parse: String.() -> T) :
+        MutableState<T> {
+        private val state = mutableStateOf(entries[key]?.parse() ?: initialValue)
+        override var value: T
+            get() = state.value
+            set(value) {
+                entries[key] = value.toString()
+                state.value = value
+            }
+
+        override fun component1() = state.component1()
+
+        override fun component2() = state.component2()
+    }
+
+    fun writeSourceCodeState() {
+        Files.writeString(toolPaths.sourceFile, sourceCode)
+    }
+
+    fun writeState() {
+        writeSourceCodeState()
+        Files.writeString(
+            file,
+            entries.joinToString("\n") { key, value -> "$key=${value.replace("\n", "\\\n")}" }
+        )
     }
 }
-
-data class Settings(
-    val directory: Path = settingsPath(),
-    val file: Path = directory.resolve("settings"),
-    val entries: MutableMap<String, String> = readSettings(file)
-)
 
 private fun settingsPath() = Paths.get(System.getProperty("user.home"), ".kotlin-explorer").apply {
     if (!exists()) Files.createDirectory(this)
 }
 
-private fun readSettings(file: Path): MutableMap<String, String> {
-    val settings = mutableMapOf<String, String>()
+private fun readSettings(file: Path): MutableScatterMap<String, String> {
+    val settings = mutableScatterMapOf<String, String>()
     if (!file.exists()) return settings
 
-    val delimiter = Regex.fromLiteral("=")
-    file.readLines().forEach { line ->
-        val parts = line.split(delimiter, 2)
-        if (parts.size == 2) {
-            settings[parts[0]] = parts[1]
+    val lines = file.readLines()
+    var i = 0
+    while (i < lines.size) {
+        val line = lines[i]
+        val index = line.indexOf('=')
+        if (index != -1) {
+            var value = line.substring(index + 1)
+            if (value.endsWith('\\')) {
+                value = value.dropLast(1) + '\n'
+                do {
+                    i++
+                    if (i >= lines.size) break
+                    value += lines[i].dropLast(1)
+                    val continuation = lines[i].endsWith('\\')
+                    if (continuation) value += '\n'
+                } while (continuation)
+            }
+            settings[line.substring(0, index)] = value
         }
+        i++
     }
+
     return settings
 }
 
 private fun readSourceCode(toolPaths: ToolPaths) = if (toolPaths.sourceFile.exists()) {
     Files.readString(toolPaths.sourceFile)
 } else {
-    "fun square(a: Int): Int {\n    return a * a\n}\n"
+    """
+    // NOTE: If Build > Keep Everything is *not* checked, used the @Keep
+    // annotation to keep the classes/methods/etc. you want to disassemble
+    fun square(a: Int): Int {
+        return a * a
+    }
+
+    """.trimIndent()
 }
-
-fun writeState(state: ExplorerState) {
-    Files.writeString(
-        state.toolPaths.sourceFile,
-        state.sourceCode
-    )
-
-    Files.writeString(
-        state.settings.file,
-        state.settings.entries
-            .map { "${it.key}=${it.value}" }
-            .joinToString("\n")
-    )
-}
-
